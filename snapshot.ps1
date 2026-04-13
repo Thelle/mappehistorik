@@ -28,7 +28,7 @@ if (-not (Test-Path $htmlFile)) {
 <html lang="da">
 <head>
 <meta charset="UTF-8">
-<title>Mappehistorik — VD</title>
+<title>Mappehistorik &mdash; VD</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Consolas,'Courier New',monospace;background:#1e1e2e;color:#cdd6f4;padding:20px}
@@ -47,7 +47,7 @@ pre{background:#181825;padding:16px;border-radius:8px;overflow-x:auto;line-heigh
 </style>
 </head>
 <body>
-<h1>Mappehistorik — VD</h1>
+<h1>Mappehistorik &mdash; VD</h1>
 <div class="toggle-row">
   <input type="checkbox" id="showDiff" checked>
   <label for="showDiff">Vis forskelle fra forrige dag</label>
