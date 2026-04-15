@@ -188,6 +188,15 @@ render();
 ## Læs eksisterende HTML og indsæt/opdater dagens snapshot
 $html = Get-Content -Path $htmlFile -Raw -Encoding UTF8
 
+## SIKKERHEDSCHECK 1: Find alle eksisterende snapshot-datoer FØR ændring
+$existingDates = [regex]::Matches($html, 'SNAPSHOTS\["(\d{4}-\d{2}-\d{2})"\]') |
+    ForEach-Object { $_.Groups[1].Value } |
+    Sort-Object -Unique
+
+## SIKKERHEDSCHECK 2: Lav backup før enhver ændring (roterende .bak)
+$backupFile = "$htmlFile.bak"
+Copy-Item -Path $htmlFile -Destination $backupFile -Force
+
 # Byg JS-array fra linjer
 $jsLines = ($folders | ForEach-Object {
     '"' + ($_ -replace '\\', '\\\\' -replace '"', '\"') + '"'
@@ -203,6 +212,29 @@ if ($html -match "SNAPSHOTS\[`"$today`"\]") {
     $html = $html -replace "// DATA_MARKER", "$entry`n// DATA_MARKER"
 }
 
+## SIKKERHEDSCHECK 3: Verificér at ingen historiske datoer er tabt
+$newDates = [regex]::Matches($html, 'SNAPSHOTS\["(\d{4}-\d{2}-\d{2})"\]') |
+    ForEach-Object { $_.Groups[1].Value } |
+    Sort-Object -Unique
+
+$lostDates = $existingDates | Where-Object { $_ -notin $newDates }
+if ($lostDates) {
+    Write-Error "AFBRUDT: Sikkerhedscheck fejlede — følgende datoer ville blive tabt: $($lostDates -join ', '). Filen er IKKE ændret. Backup findes i $backupFile"
+    exit 1
+}
+
+## SIKKERHEDSCHECK 4: Verificér at den nye streng indeholder DATA_MARKER (struktur intakt)
+if ($html -notmatch "// DATA_MARKER") {
+    Write-Error "AFBRUDT: DATA_MARKER mangler efter ændring — filen virker korrupt. Backup findes i $backupFile"
+    exit 1
+}
+
+## SIKKERHEDSCHECK 5: Verificér minimum filstørrelse (beskyt mod tom fil)
+if ($html.Length -lt 2000) {
+    Write-Error "AFBRUDT: Ny HTML er mistænkeligt lille ($($html.Length) tegn). Backup findes i $backupFile"
+    exit 1
+}
+
 Set-Content -Path $htmlFile -Value $html -Encoding UTF8
 
-Write-Host "Snapshot gemt for $today"
+Write-Host "Snapshot gemt for $today ($($newDates.Count) snapshots i alt)"
