@@ -41,6 +41,9 @@ input[type=date]{background:#313244;border:1px solid #45475a;color:#cdd6f4;paddi
 pre{background:#181825;padding:16px;border-radius:8px;overflow-x:auto;line-height:1.6;font-size:0.95em;white-space:pre-wrap}
 .diff-added{color:#a6e3a1;font-weight:bold}
 .diff-removed{color:#f38ba8;text-decoration:line-through}
+.diff-renamed{color:#f9e2af;font-weight:bold}
+.diff-renamed .arrow{color:#89b4fa;margin:0 6px}
+.diff-renamed .old{opacity:0.7}
 .toggle-row{margin-bottom:10px;display:flex;align-items:center;gap:10px}
 .toggle-row label{cursor:pointer;color:#89b4fa}
 .info{color:#6c7086;font-size:0.85em;margin-top:12px}
@@ -73,6 +76,13 @@ var info = document.getElementById('info');
 var showDiff = document.getElementById('showDiff');
 var currentIdx = dates.length - 1;
 
+function getIdentity(line){
+  var s = line.replace(/^\s+/,'');
+  s = s.replace(/^\d+_/,'');
+  var idx = s.indexOf('_');
+  return idx >= 0 ? s.substring(0, idx) : s;
+}
+
 function render() {
   if (dates.length === 0) { tree.textContent = '(ingen data endnu)'; return; }
   if (currentIdx < 0) currentIdx = 0;
@@ -84,14 +94,64 @@ function render() {
   dateLabel.textContent = 'Snapshot ' + (currentIdx+1) + ' af ' + dates.length;
   var lines = SNAPSHOTS[d];
   if (showDiff.checked && currentIdx > 0) {
-    var prev = new Set(SNAPSHOTS[dates[currentIdx-1]]);
-    var curr = new Set(lines);
+    var prevLines = SNAPSHOTS[dates[currentIdx-1]];
+    var prevSet = new Set(prevLines);
+    var currSet = new Set(lines);
+
+    // Beregn slettede og tilføjede linjer
+    var removedLines = prevLines.filter(function(l){ return !currSet.has(l); });
+    var addedLines   = lines.filter(function(l){ return !prevSet.has(l); });
+
+    // Grupper efter identitet
+    var removedByIdent = {};
+    var addedByIdent   = {};
+    removedLines.forEach(function(l){
+      var id = getIdentity(l);
+      (removedByIdent[id] = removedByIdent[id] || []).push(l);
+    });
+    addedLines.forEach(function(l){
+      var id = getIdentity(l);
+      (addedByIdent[id] = addedByIdent[id] || []).push(l);
+    });
+
+    // Find omdøbninger: præcis 1 slettet + 1 tilføjet med samme identitet
+    var renameByNew = {};      // nyt linje -> gammelt linje
+    var renamedRemovedSet = new Set();
+    Object.keys(removedByIdent).forEach(function(id){
+      if (id && removedByIdent[id].length === 1 && addedByIdent[id] && addedByIdent[id].length === 1){
+        var oldL = removedByIdent[id][0];
+        var newL = addedByIdent[id][0];
+        renameByNew[newL] = oldL;
+        renamedRemovedSet.add(oldL);
+      }
+    });
+
+    // Byg output: først slettede (ikke del af omdøbning), dernæst nuværende rækkefølge
     var allLines = [];
-    SNAPSHOTS[dates[currentIdx-1]].forEach(function(l){ if(!curr.has(l)) allLines.push({t:l,s:'r'}); });
-    lines.forEach(function(l){ allLines.push({t:l, s: prev.has(l)?'':'a'}); });
+    prevLines.forEach(function(l){
+      if (!currSet.has(l) && !renamedRemovedSet.has(l)){
+        allLines.push({t:l, s:'r'});
+      }
+    });
+    lines.forEach(function(l){
+      if (prevSet.has(l)) {
+        allLines.push({t:l, s:''});
+      } else if (renameByNew[l]) {
+        allLines.push({t:l, s:'m', old: renameByNew[l]});
+      } else {
+        allLines.push({t:l, s:'a'});
+      }
+    });
+
     tree.innerHTML = allLines.map(function(o){
       if(o.s==='a') return '<span class="diff-added">+ '+esc(o.t)+'</span>';
       if(o.s==='r') return '<span class="diff-removed">- '+esc(o.t)+'</span>';
+      if(o.s==='m'){
+        var indent = (o.t.match(/^\s*/) || [''])[0];
+        var oldName = o.old.replace(/^\s+/, '');
+        var newName = o.t.replace(/^\s+/, '');
+        return '<span class="diff-renamed">'+indent+'~ <span class="old">'+esc(oldName)+'</span><span class="arrow">&rarr;</span>'+esc(newName)+'</span>';
+      }
       return '  '+esc(o.t);
     }).join('\n');
   } else {
