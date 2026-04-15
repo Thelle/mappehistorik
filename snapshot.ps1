@@ -5,17 +5,53 @@ $htmlFile  = Join-Path $PSScriptRoot "mappehistorik.html"
 $today     = Get-Date -Format "yyyy-MM-dd"
 $maxDepth  = 2
 
-## Hent mapper (2 niveauer), ekskluder _historik
+## Funktion: Læs eller opret folder-id i desktop.ini
+function Get-OrCreateFolderId {
+    param([string]$folderPath)
+    $desktopIni = Join-Path $folderPath "desktop.ini"
+    $guidPattern = 'FolderId=([0-9a-fA-F\-]{36})'
+
+    if (Test-Path $desktopIni) {
+        $existingAttrs = (Get-Item $desktopIni -Force).Attributes
+        try {
+            $content = [System.IO.File]::ReadAllText($desktopIni)
+        } catch {
+            $content = ""
+        }
+        $match = [regex]::Match($content, $guidPattern)
+        if ($match.Success) {
+            return $match.Groups[1].Value
+        }
+        # Eksisterende desktop.ini uden [Claude] — append
+        $id = [guid]::NewGuid().ToString()
+        $appendContent = $content.TrimEnd() + "`r`n`r`n[Claude]`r`nFolderId=$id`r`nCreated=$today`r`n"
+        (Get-Item $desktopIni -Force).Attributes = 'Normal'
+        [System.IO.File]::WriteAllText($desktopIni, $appendContent)
+        (Get-Item $desktopIni -Force).Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+        return $id
+    } else {
+        $id = [guid]::NewGuid().ToString()
+        $newContent = "[Claude]`r`nFolderId=$id`r`nCreated=$today`r`n"
+        [System.IO.File]::WriteAllText($desktopIni, $newContent)
+        (Get-Item $desktopIni -Force).Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+        return $id
+    }
+}
+
+## Hent mapper (2 niveauer), ekskluder _historik, og hent/opret folder-id
 $folders = @()
-Get-ChildItem -Path $rootDir -Directory -ErrorAction SilentlyContinue |
+$folderIds = @()
+Get-ChildItem -Path $rootDir -Directory -Force -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -ne "_historik" } |
     Sort-Object Name |
     ForEach-Object {
-        $folders += $_.Name
-        Get-ChildItem -Path $_.FullName -Directory -ErrorAction SilentlyContinue |
+        $folders   += $_.Name
+        $folderIds += (Get-OrCreateFolderId $_.FullName)
+        Get-ChildItem -Path $_.FullName -Directory -Force -ErrorAction SilentlyContinue |
             Sort-Object Name |
             ForEach-Object {
-                $folders += "  " + $_.Name
+                $folders   += "  " + $_.Name
+                $folderIds += (Get-OrCreateFolderId $_.FullName)
             }
     }
 
@@ -66,6 +102,7 @@ pre{background:#181825;padding:16px;border-radius:8px;overflow-x:auto;line-heigh
 
 <script>
 var SNAPSHOTS = {};
+var SNAPSHOT_IDS = {};
 // DATA_MARKER
 
 var dates = Object.keys(SNAPSHOTS).sort();
@@ -94,35 +131,66 @@ function render() {
   dateLabel.textContent = 'Snapshot ' + (currentIdx+1) + ' af ' + dates.length;
   var lines = SNAPSHOTS[d];
   if (showDiff.checked && currentIdx > 0) {
-    var prevLines = SNAPSHOTS[dates[currentIdx-1]];
+    var prevDate = dates[currentIdx-1];
+    var prevLines = SNAPSHOTS[prevDate];
+    var prevIds = SNAPSHOT_IDS[prevDate] || [];
+    var currIds = SNAPSHOT_IDS[d] || [];
     var prevSet = new Set(prevLines);
     var currSet = new Set(lines);
+
+    // Byg linje → id mapping (til ID-baseret omdøbningsdetektion)
+    var prevLineToId = {};
+    var currLineToId = {};
+    prevLines.forEach(function(l, i){ if(prevIds[i]) prevLineToId[l] = prevIds[i]; });
+    lines.forEach(function(l, i){ if(currIds[i]) currLineToId[l] = currIds[i]; });
 
     // Beregn slettede og tilføjede linjer
     var removedLines = prevLines.filter(function(l){ return !currSet.has(l); });
     var addedLines   = lines.filter(function(l){ return !prevSet.has(l); });
 
-    // Grupper efter identitet
+    var renameByNew = {};      // nyt linje -> gammelt linje
+    var renamedRemovedSet = new Set();
+    var consumedAdded = new Set();
+
+    // PRIMÆRT: ID-baseret omdøbningsdetektion
+    var addedById = {};
+    addedLines.forEach(function(l){
+      var id = currLineToId[l];
+      if (id) {
+        (addedById[id] = addedById[id] || []).push(l);
+      }
+    });
+    removedLines.forEach(function(l){
+      var id = prevLineToId[l];
+      if (id && addedById[id] && addedById[id].length > 0){
+        var newL = addedById[id].shift();
+        renameByNew[newL] = l;
+        renamedRemovedSet.add(l);
+        consumedAdded.add(newL);
+      }
+    });
+
+    // FALLBACK: Navn-baseret heuristik for linjer uden ID-match
+    var fallbackRemoved = removedLines.filter(function(l){ return !renamedRemovedSet.has(l); });
+    var fallbackAdded   = addedLines.filter(function(l){ return !consumedAdded.has(l); });
+
     var removedByIdent = {};
     var addedByIdent   = {};
-    removedLines.forEach(function(l){
+    fallbackRemoved.forEach(function(l){
       var id = getIdentity(l);
       (removedByIdent[id] = removedByIdent[id] || []).push(l);
     });
-    addedLines.forEach(function(l){
+    fallbackAdded.forEach(function(l){
       var id = getIdentity(l);
       (addedByIdent[id] = addedByIdent[id] || []).push(l);
     });
-
-    // Find omdøbninger: præcis 1 slettet + 1 tilføjet med samme identitet
-    var renameByNew = {};      // nyt linje -> gammelt linje
-    var renamedRemovedSet = new Set();
     Object.keys(removedByIdent).forEach(function(id){
       if (id && removedByIdent[id].length === 1 && addedByIdent[id] && addedByIdent[id].length === 1){
         var oldL = removedByIdent[id][0];
         var newL = addedByIdent[id][0];
         renameByNew[newL] = oldL;
         renamedRemovedSet.add(oldL);
+        consumedAdded.add(newL);
       }
     });
 
@@ -197,19 +265,30 @@ $existingDates = [regex]::Matches($html, 'SNAPSHOTS\["(\d{4}-\d{2}-\d{2})"\]') |
 $backupFile = "$htmlFile.bak"
 Copy-Item -Path $htmlFile -Destination $backupFile -Force
 
-# Byg JS-array fra linjer
+# Byg JS-arrays fra linjer og id'er
 $jsLines = ($folders | ForEach-Object {
     '"' + ($_ -replace '\\', '\\\\' -replace '"', '\"') + '"'
 }) -join ','
 
-$entry = "SNAPSHOTS[`"$today`"]=[$jsLines];"
+$jsIds = ($folderIds | ForEach-Object {
+    '"' + $_ + '"'
+}) -join ','
 
+$linesEntry = "SNAPSHOTS[`"$today`"]=[$jsLines];"
+$idsEntry   = "SNAPSHOT_IDS[`"$today`"]=[$jsIds];"
+
+# Indsæt/opdater SNAPSHOTS[today]
 if ($html -match "SNAPSHOTS\[`"$today`"\]") {
-    # Erstat eksisterende snapshot for i dag
-    $html = $html -replace "SNAPSHOTS\[`"$today`"\]\s*=\s*\[.*?\];", $entry
+    $html = $html -replace "SNAPSHOTS\[`"$today`"\]\s*=\s*\[.*?\];", $linesEntry
 } else {
-    # Indsæt nyt snapshot før DATA_MARKER
-    $html = $html -replace "// DATA_MARKER", "$entry`n// DATA_MARKER"
+    $html = $html -replace "// DATA_MARKER", "$linesEntry`n// DATA_MARKER"
+}
+
+# Indsæt/opdater SNAPSHOT_IDS[today]
+if ($html -match "SNAPSHOT_IDS\[`"$today`"\]") {
+    $html = $html -replace "SNAPSHOT_IDS\[`"$today`"\]\s*=\s*\[.*?\];", $idsEntry
+} else {
+    $html = $html -replace "// DATA_MARKER", "$idsEntry`n// DATA_MARKER"
 }
 
 ## SIKKERHEDSCHECK 3: Verificér at ingen historiske datoer er tabt
