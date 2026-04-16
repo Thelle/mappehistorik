@@ -3,7 +3,6 @@
 $rootDir   = Split-Path -Parent $PSScriptRoot   # VD-mappen (parent af _historik)
 $htmlFile  = Join-Path $PSScriptRoot "mappehistorik.html"
 $today     = Get-Date -Format "yyyy-MM-dd"
-$maxDepth  = 2
 
 ## Funktion: Læs eller opret folder-id i desktop.ini
 function Get-OrCreateFolderId {
@@ -38,22 +37,32 @@ function Get-OrCreateFolderId {
     }
 }
 
-## Hent mapper (2 niveauer), ekskluder _historik, og hent/opret folder-id
-$folders = @()
-$folderIds = @()
+## Rekursiv mappevandring (alle niveauer)
+function Walk-Folder {
+    param([string]$path, [int]$level)
+    Get-ChildItem -Path $path -Directory -Force -ErrorAction SilentlyContinue |
+        Sort-Object Name |
+        ForEach-Object {
+            $indent = "  " * $level
+            $script:folders   += $indent + $_.Name
+            $script:folderIds += (Get-OrCreateFolderId $_.FullName)
+            Walk-Folder $_.FullName ($level + 1)
+        }
+}
+
+## Hent mapper (alle niveauer), ekskluder _historik, og hent/opret folder-id
+$script:folders = @()
+$script:folderIds = @()
 Get-ChildItem -Path $rootDir -Directory -Force -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -ne "_historik" } |
     Sort-Object Name |
     ForEach-Object {
-        $folders   += $_.Name
-        $folderIds += (Get-OrCreateFolderId $_.FullName)
-        Get-ChildItem -Path $_.FullName -Directory -Force -ErrorAction SilentlyContinue |
-            Sort-Object Name |
-            ForEach-Object {
-                $folders   += "  " + $_.Name
-                $folderIds += (Get-OrCreateFolderId $_.FullName)
-            }
+        $script:folders   += $_.Name
+        $script:folderIds += (Get-OrCreateFolderId $_.FullName)
+        Walk-Folder $_.FullName 1
     }
+$folders   = $script:folders
+$folderIds = $script:folderIds
 
 $snapshotText = $folders -join "`n"
 
@@ -74,6 +83,7 @@ h1{font-size:1.3em;margin-bottom:12px;color:#89b4fa}
 .nav-btn{background:#313244;border:1px solid #45475a;color:#cdd6f4;padding:4px 12px;cursor:pointer;border-radius:4px;font-size:1em}
 .nav-btn:hover{background:#45475a}
 input[type=date]{background:#313244;border:1px solid #45475a;color:#cdd6f4;padding:4px 8px;border-radius:4px;font-size:1em;font-family:inherit;color-scheme:dark}
+select{background:#313244;border:1px solid #45475a;color:#cdd6f4;padding:4px 8px;border-radius:4px;font-size:1em;font-family:inherit}
 pre{background:#181825;padding:16px;border-radius:8px;overflow-x:auto;line-height:1.6;font-size:0.95em;white-space:pre-wrap}
 .diff-added{color:#a6e3a1;font-weight:bold}
 .diff-removed{color:#f38ba8;text-decoration:line-through}
@@ -90,6 +100,8 @@ pre{background:#181825;padding:16px;border-radius:8px;overflow-x:auto;line-heigh
 <div class="toggle-row">
   <input type="checkbox" id="showDiff" checked>
   <label for="showDiff">Vis forskelle fra forrige dag</label>
+  <span style="margin-left:20px">Dybde:</span>
+  <select id="depthPicker"></select>
 </div>
 <div class="controls">
   <button class="nav-btn" onclick="step(-1)">&#9664; Forrige</button>
@@ -111,6 +123,7 @@ var dateLabel = document.getElementById('dateLabel');
 var tree = document.getElementById('tree');
 var info = document.getElementById('info');
 var showDiff = document.getElementById('showDiff');
+var depthPicker = document.getElementById('depthPicker');
 var currentIdx = dates.length - 1;
 
 function getIdentity(line){
@@ -118,6 +131,52 @@ function getIdentity(line){
   s = s.replace(/^\d+_/,'');
   var idx = s.indexOf('_');
   return idx >= 0 ? s.substring(0, idx) : s;
+}
+
+function getDepth(line){
+  var indent = (line.match(/^\s*/) || [''])[0].length;
+  return (indent / 2) + 1;
+}
+
+function filterByDepth(lines, ids, maxDepth){
+  if (!maxDepth) return { lines: lines.slice(), ids: (ids || []).slice() };
+  var outL = [];
+  var outI = [];
+  for (var i = 0; i < lines.length; i++){
+    if (getDepth(lines[i]) <= maxDepth){
+      outL.push(lines[i]);
+      outI.push(ids && ids[i] ? ids[i] : null);
+    }
+  }
+  return { lines: outL, ids: outI };
+}
+
+function populateDepthPicker(){
+  var maxDepth = 1;
+  Object.keys(SNAPSHOTS).forEach(function(d){
+    SNAPSHOTS[d].forEach(function(l){
+      var dep = getDepth(l);
+      if (dep > maxDepth) maxDepth = dep;
+    });
+  });
+  var saved = localStorage.getItem('mappehistorik_depth') || '2';
+  depthPicker.innerHTML = '';
+  for (var i = 1; i <= maxDepth; i++){
+    var opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = String(i);
+    depthPicker.appendChild(opt);
+  }
+  var allOpt = document.createElement('option');
+  allOpt.value = '0';
+  allOpt.textContent = 'Alle';
+  depthPicker.appendChild(allOpt);
+  // Vælg gemt dybde, eller 2 hvis ikke gemt
+  if (saved && depthPicker.querySelector('option[value="'+saved+'"]')){
+    depthPicker.value = saved;
+  } else {
+    depthPicker.value = '2';
+  }
 }
 
 function render() {
@@ -129,12 +188,15 @@ function render() {
   datePicker.min = dates[0];
   datePicker.max = dates[dates.length - 1];
   dateLabel.textContent = 'Snapshot ' + (currentIdx+1) + ' af ' + dates.length;
-  var lines = SNAPSHOTS[d];
+  var maxD = parseInt(depthPicker.value) || 0;
+  var curr = filterByDepth(SNAPSHOTS[d], SNAPSHOT_IDS[d] || [], maxD);
+  var lines = curr.lines;
+  var currIds = curr.ids;
   if (showDiff.checked && currentIdx > 0) {
     var prevDate = dates[currentIdx-1];
-    var prevLines = SNAPSHOTS[prevDate];
-    var prevIds = SNAPSHOT_IDS[prevDate] || [];
-    var currIds = SNAPSHOT_IDS[d] || [];
+    var prev = filterByDepth(SNAPSHOTS[prevDate], SNAPSHOT_IDS[prevDate] || [], maxD);
+    var prevLines = prev.lines;
+    var prevIds = prev.ids;
     var prevSet = new Set(prevLines);
     var currSet = new Set(lines);
 
@@ -244,7 +306,12 @@ datePicker.addEventListener('input', function(){
   render();
 });
 showDiff.addEventListener('change', render);
+depthPicker.addEventListener('change', function(){
+  localStorage.setItem('mappehistorik_depth', depthPicker.value);
+  render();
+});
 
+populateDepthPicker();
 render();
 </script>
 </body>
