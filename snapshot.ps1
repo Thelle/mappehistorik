@@ -44,25 +44,60 @@ function Walk-Folder {
         Sort-Object Name |
         ForEach-Object {
             $indent = "  " * $level
-            $script:folders   += $indent + $_.Name
-            $script:folderIds += (Get-OrCreateFolderId $_.FullName)
+            $script:folders     += $indent + $_.Name
+            $script:folderIds   += (Get-OrCreateFolderId $_.FullName)
+            $script:folderPaths += $_.FullName
             Walk-Folder $_.FullName ($level + 1)
         }
 }
 
 ## Hent mapper (alle niveauer), ekskluder _historik, og hent/opret folder-id
-$script:folders = @()
-$script:folderIds = @()
+$script:folders     = @()
+$script:folderIds   = @()
+$script:folderPaths = @()
 Get-ChildItem -Path $rootDir -Directory -Force -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -ne "_historik" } |
     Sort-Object Name |
     ForEach-Object {
-        $script:folders   += $_.Name
-        $script:folderIds += (Get-OrCreateFolderId $_.FullName)
+        $script:folders     += $_.Name
+        $script:folderIds   += (Get-OrCreateFolderId $_.FullName)
+        $script:folderPaths += $_.FullName
         Walk-Folder $_.FullName 1
     }
-$folders   = $script:folders
-$folderIds = $script:folderIds
+$folders     = $script:folders
+$folderIds   = $script:folderIds
+$folderPaths = $script:folderPaths
+
+## Detekter og ret dublerede folder-ID'er (opstår ved copy/paste af mapper)
+$idGroups = @{}
+for ($i = 0; $i -lt $folderIds.Count; $i++) {
+    $id = $folderIds[$i]
+    if (-not $idGroups.ContainsKey($id)) { $idGroups[$id] = @() }
+    $idGroups[$id] += $i
+}
+foreach ($id in $idGroups.Keys) {
+    $indices = $idGroups[$id]
+    if ($indices.Count -gt 1) {
+        # Behold ID i den ældste mappe — tildel nyt ID til alle nyere kopier
+        $sorted = $indices | Sort-Object { (Get-Item $folderPaths[$_] -Force).CreationTime }
+        $oldestIdx = $sorted[0]
+        foreach ($idx in $sorted | Select-Object -Skip 1) {
+            $newId = [guid]::NewGuid().ToString()
+            $desktopIni = Join-Path $folderPaths[$idx] "desktop.ini"
+            $content = if (Test-Path $desktopIni) { [System.IO.File]::ReadAllText($desktopIni) } else { "" }
+            if ($content -match 'FolderId=[0-9a-fA-F\-]{36}') {
+                $content = $content -replace 'FolderId=[0-9a-fA-F\-]{36}', "FolderId=$newId"
+            } else {
+                $content = $content.TrimEnd() + "`r`n`r`n[Claude]`r`nFolderId=$newId`r`nCreated=$today`r`n"
+            }
+            if (Test-Path $desktopIni) { (Get-Item $desktopIni -Force).Attributes = 'Normal' }
+            [System.IO.File]::WriteAllText($desktopIni, $content)
+            (Get-Item $desktopIni -Force).Attributes = [System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System
+            $folderIds[$idx] = $newId
+            Write-Host "[ID-duplikat] Nyt ID tildelt: $($folders[$idx].Trim()) (kopi af $($folders[$oldestIdx].Trim()))"
+        }
+    }
+}
 
 $snapshotText = $folders -join "`n"
 
